@@ -3,7 +3,8 @@
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
-
+import time
+import datetime
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
 sys.path.append(f"{os.path.dirname(os.path.abspath(__file__))}/../../third_party/BigVGAN/")
 
@@ -472,7 +473,7 @@ def infer_batch_process(
 
         # inference
         with torch.inference_mode():
-            generated, _ = model_obj.sample(
+            generated, trajectory = model_obj.sample(
                 cond=audio,
                 text=final_text_list,
                 duration=duration,
@@ -480,7 +481,11 @@ def infer_batch_process(
                 cfg_strength=cfg_strength,
                 sway_sampling_coef=sway_sampling_coef,
             )
-            del _
+            temp_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            traj_filename = f"trajectory-{temp_timestamp}.pt"
+
+            torch.save(trajectory, traj_filename)
+            del trajectory
 
             generated = generated.to(torch.float32)  # generated mel spectrogram
             generated = generated[:, ref_audio_len:, :]
