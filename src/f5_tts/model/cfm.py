@@ -198,19 +198,20 @@ class CFM(nn.Module):
         trajectory = []
         
         for i in range(t.shape[0] - 1):
-          ti = t[i]
-          ti1 = t[i + 1]
+            ti = t[i]
+            ti1 = t[i + 1]
+        
+            trajectory_i = odeint(fn, y0, torch.Tensor([ti, ti1]), **self.odeint_kwargs)
+            y_1, y0 = None, None
+            if trajectory_i.shape[0] == 2:
+                y_1, y0 = trajectory_i
+            else:
+                y0 = trajectory_i[-1]
 
-          trajectory_i = odeint(fn, y0, torch.Tensor([ti, ti1]), **self.odeint_kwargs)
-          y_1, y0 = None, None
-          if trajectory_i.shape[0] == 2:
-            y_1, y0 = trajectory_i
-          else:
-            y0 = trajectory_i[-1]
-
-          if y_1 is not None and not any(torch.equal(y_1, t) for t in trajectory):
-            trajectory.append(y_1)
-          trajectory.append(y0)
+        
+            if y_1 is not None and not any(torch.equal(y_1, t) for t in trajectory):
+                trajectory.append(y_1)
+            trajectory.append(y0)
           # trajectory = torch.cat([trajectory, y0.unsqueeze(0)], dim=0)
           # trajectory.append(y0)
         trajectory = torch.stack(trajectory)
