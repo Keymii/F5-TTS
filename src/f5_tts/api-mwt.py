@@ -192,8 +192,8 @@ if __name__ == "__main__":
           ref_file = f"/content/voicefiles/{wavfile}",
           ref_text = "Come to a concert surrounded by a thousand candles.",
           gen_text=quotes[idx],
-          file_wave=str(files("f5_tts").joinpath("../../tests/api_out.wav")),
-          file_spec=str(files("f5_tts").joinpath("../../tests/api_out.png")),
+          file_wave=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}.wav')),
+          file_spec=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}.png')),
           seed=None,
           nfe_step = 60
       )
