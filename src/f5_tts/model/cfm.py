@@ -194,12 +194,26 @@ class CFM(nn.Module):
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
         
-        trajectory = y0
+        print("shape of y0:", y0.shape)
+        trajectory = []
+        
+        for i in range(t.shape[0] - 1):
+          ti = t[i]
+          ti1 = t[i + 1]
 
-        for ti in t:
-            trajectory_i = odeint(fn, y0, ti, **self.odeint_kwargs)
+          trajectory_i = odeint(fn, y0, torch.Tensor([ti, ti1]), **self.odeint_kwargs)
+          y_1, y0 = None, None
+          if trajectory_i.shape[0] == 2:
+            y_1, y0 = trajectory_i
+          else:
             y0 = trajectory_i[-1]
-            trajectory = torch.stack([trajectory, y0], dim=0)
+
+          if y_1 is not None and not any(torch.equal(y_1, t) for t in trajectory):
+            trajectory.append(y_1)
+          trajectory.append(y0)
+          # trajectory = torch.cat([trajectory, y0.unsqueeze(0)], dim=0)
+          # trajectory.append(y0)
+        trajectory = torch.stack(trajectory)
 
         self.transformer.clear_cache()
 
