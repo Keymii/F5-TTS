@@ -193,8 +193,14 @@ class CFM(nn.Module):
         t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        
+        trajectory = y0
 
-        trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+        for ti in t:
+            trajectory_i = odeint(fn, y0, ti, **self.odeint_kwargs)
+            y0 = trajectory_i[-1]
+            trajectory = torch.stack([trajectory, y0], dim=0)
+
         self.transformer.clear_cache()
 
         sampled = trajectory[-1]
