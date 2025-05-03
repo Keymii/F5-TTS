@@ -223,9 +223,15 @@ class CFM(nn.Module):
           # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
           yavg_ = yavg_.type(torch.float16)
 
-          cA2 = (1 - (step/t.shape[0])*0.002)*cA2
-          cH2 = (1.13 + (step/t.shape[0])*0.002)*cH2
-          # cV2 = (1.03 + (step/t.shape[0])*0.0002)*cV2
+          # cA2 = (1 - (step/t.shape[0])*0.2)*cA2
+          
+          cA2 = cA2*np.exp(-step/((3+(t.shape[0]-10)*(18-3)/(60-10))*t.shape[0]))
+          cV2 = cV2*np.exp(-step/(t.shape[0]*(0.020471535365152418*(t.shape[0]**2) + 0.8300747556066685*t.shape[0] -2.154974123059176)))
+          # cA2 = cA2*np.exp(-step/(6*np.sqrt(t.shape[0])))
+          # cV2 = cV2*np.exp(-step/(20*np.sqrt(t.shape[0])))
+          # if step > (t[-1]/2.0):
+            # cH2 = (1.05 - (step/t.shape[0])*0.002)*cH2
+          # cV2 = (1.05 - (step/t.shape[0])*0.002)*cV2
           # cD2 = (1.03 + (step/t.shape[0])*0.0002)*cD2
           if y0_.shape[1] % 2 != 0:
             y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
@@ -264,7 +270,8 @@ class CFM(nn.Module):
 
         self.transformer.clear_cache()
 
-        sampled = trajectory[-1]
+        sampled = 3*trajectory[int(-0.006147211040828051*(t.shape[0]**2) + 1.0969522714203557*(t.shape[0]) -3.1625934445083077)]
+        # sampled = 3*trajectory[-1]
         out = sampled
         out = torch.where(cond_mask, cond, out)
 
