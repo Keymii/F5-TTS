@@ -12,11 +12,14 @@ from __future__ import annotations
 from random import random
 from typing import Callable
 
+import pywt
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
+import numpy as np 
+from copy import copy
 
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import (
@@ -194,19 +197,62 @@ class CFM(nn.Module):
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
         
-        print("shape of y0:", y0.shape)
+        # print("shape of y0:", y0.shape)
         trajectory = []
-        
+
+        def reweight(y0_, yavg_, gamma, step):
+          #y0_.shape = [1, x, 100]
+
+          mel2 = y0_.detach().cpu().numpy()
+          #normalising mel
+          # mel2 = normalize_mel_spectrogram_librosa(np.maximum(mel2, 1e-6))
+          # mel2 /= np.max(np.abs(np.array(mel2)))
+          coeffs = pywt.wavedec2(mel2, 'haar', level=1)
+          cA2, (cH2, cV2, cD2) = coeffs  
+          coeffs1 = pywt.wavedec2(yavg_.detach().cpu().numpy(), 'haar', level=1)
+          cA2avg, (cH2avg, cV2avg, cD2avg) = coeffs1
+
+          cA2 = (1-gamma)*(cA2) + gamma*(cA2avg)
+          cH2 = (1-gamma)*(cH2) + gamma*(cH2avg)
+          cV2 = (1-gamma)*(cV2) + gamma*(cV2avg)
+          cD2 = (1-gamma)*(cD2) + gamma*(cD2avg)
+          if y0_.shape[1] % 2 != 0:
+            yavg_ = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
+          else:
+            yavg_ = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+          # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+          yavg_ = yavg_.type(torch.float16)
+
+          cA2 = (1 - (step/t.shape[0])*0.002)*cA2
+          cH2 = (1.13 + (step/t.shape[0])*0.002)*cH2
+          # cV2 = (1.03 + (step/t.shape[0])*0.0002)*cV2
+          # cD2 = (1.03 + (step/t.shape[0])*0.0002)*cD2
+          if y0_.shape[1] % 2 != 0:
+            y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
+          else:
+            y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+          # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+          y = y.type(torch.float16)
+
+          y = y.to(device)
+          yavg_ = yavg_.to(device)
+          return y, yavg_
+
+        # cA2avg, cH2avg, cV2avg, cD2avg = torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50)), torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50)), torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50)), torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50))
+        yavg = copy(y0)
+        ytemp = y0
+
         for i in range(t.shape[0] - 1):
             ti = t[i]
             ti1 = t[i + 1]
-        
+            # print(y0.dtype, ytemp.dtype, yavg.dtype, (torch.Tensor([ti, ti1])).dtype)    
             trajectory_i = odeint(fn, y0, torch.Tensor([ti, ti1]), **self.odeint_kwargs)
             y_1, y0 = None, None
             if trajectory_i.shape[0] == 2:
                 y_1, y0 = trajectory_i
+                y0, yavg = reweight(y0, yavg, 0.05, i)              #this is the one being called
             else:
-                y0 = trajectory_i[-1]
+                y0, yavg = reweight(trajectory_i[-1], yavg, 1, i)
 
         
             if y_1 is not None and not any(torch.equal(y_1, t) for t in trajectory):

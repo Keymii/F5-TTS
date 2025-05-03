@@ -195,7 +195,7 @@ if __name__ == "__main__":
           file_wave=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}.wav')),
           file_spec=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}.png')),
           seed=None,
-          nfe_step = 60
+          nfe_step = 20
       )
 
       print("seed :", f5tts.seed)
