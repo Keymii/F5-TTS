@@ -187,15 +187,14 @@ if __name__ == "__main__":
     ]
 
     for idx, wavfile in enumerate(wavfiles):
-      wav, sr, spec = f5tts.infer(
-          # ref_file=str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav")),
-          ref_file = f"/content/voicefiles/{wavfile}",
-          ref_text = "Come to a concert surrounded by a thousand candles.",
-          gen_text=quotes[idx],
-          file_wave=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}.wav')),
-          file_spec=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}.png')),
-          seed=None,
-          nfe_step = 20
-      )
-
-      print("seed :", f5tts.seed)
+      for qidx in range(10):
+        wav, sr, spec = f5tts.infer(
+            # ref_file=str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav")),
+            ref_file = f"/content/voicefiles/{wavfile}",
+            ref_text = "Come to a concert surrounded by a thousand candles.",
+            gen_text=quotes[qidx],
+            file_wave=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}-{qidx}.wav')),
+            file_spec=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}-{qidx}.png')),
+            seed=2025,
+            nfe_step = 20
+        )
