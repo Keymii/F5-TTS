@@ -482,7 +482,7 @@ def infer_batch_process(
                 sway_sampling_coef=sway_sampling_coef,
             )
             temp_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            traj_filename = f"trajectory-{temp_timestamp}.pt"
+            traj_filename = f"trajectory-boost-f5tts-{temp_timestamp}.pt"
 
             torch.save(trajectory, traj_filename)
             del trajectory
