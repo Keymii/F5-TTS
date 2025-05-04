@@ -197,7 +197,8 @@ class CFM(nn.Module):
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
         self.transformer.clear_cache()
 
-        sampled = trajectory[-1]
+        sampled = 3*trajectory[int(-0.006147211040828051*(t.shape[0]**2) + 1.0969522714203557*(t.shape[0]) -3.1625934445083077)]
+        # sampled = 3*trajectory[-1]
         out = sampled
         out = torch.where(cond_mask, cond, out)
 
