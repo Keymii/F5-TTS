@@ -185,7 +185,7 @@ if __name__ == "__main__":
         "Fall seven times, stand up eight.",
         "Believe you can, and you’re halfway there."
     ]
-
+    args = sys.argv[1:]
     for idx, wavfile in enumerate(wavfiles):
       for qidx in range(10):
         wav, sr, spec = f5tts.infer(
@@ -196,7 +196,7 @@ if __name__ == "__main__":
             file_wave=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}-{qidx}.wav')),
             file_spec=str(files("f5_tts").joinpath(f'../../tests/api_out{idx}-{qidx}.png')),
             seed=2025,
-            nfe_step = 20
+            nfe_step = int(args[0]) if len(args) == 1 else 20
         )
 
     #   print("seed :", f5tts.seed)
