@@ -1,3 +1,4 @@
+import numpy as np
 import random
 import sys
 from importlib.resources import files
@@ -8,6 +9,10 @@ import tqdm
 from cached_path import cached_path
 from hydra.utils import get_class
 from omegaconf import OmegaConf
+import time
+import wave
+import contextlib
+
 
 from f5_tts.infer.utils_infer import (
     load_model,
@@ -150,6 +155,13 @@ class F5TTS:
         return wav, sr, spec
 
 
+def get_wav_duration(filename):
+    with contextlib.closing(wave.open(filename, 'r')) as wf:
+        frames = wf.getnframes()
+        rate = wf.getframerate()
+        duration = frames / float(rate)
+        return duration
+
 if __name__ == "__main__":
     f5tts = F5TTS()
     wavfiles = os.listdir("/content/voicefiles/")
@@ -185,9 +197,11 @@ if __name__ == "__main__":
         "Fall seven times, stand up eight.",
         "Believe you can, and you’re halfway there."
     ]
+    RTF_arr = []
     args = sys.argv[1:]
     for idx, wavfile in enumerate(wavfiles):
       for qidx in range(10):
+        start_time = time.time()
         wav, sr, spec = f5tts.infer(
             # ref_file=str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav")),
             ref_file = f"/content/voicefiles/{wavfile}",
@@ -198,5 +212,13 @@ if __name__ == "__main__":
             seed=2025,
             nfe_step = int(args[0]) if len(args) == 1 else 20
         )
+        stop_time = time.time()
+        wav_duration_sec = get_wav_duration(f"../../tests/api_out{idx}-{qidx}.wav")
 
+        runtime = stop_time - start_time
+        RTF = runtime/wav_duration_sec
+        RTF_arr.append(RTF)
+    
+    print(RTF_arr)
+    print("Avg RTF: ", np.mean(RTF_arr))
     #   print("seed :", f5tts.seed)

@@ -13,14 +13,14 @@ from random import random
 from typing import Callable
 
 import pywt
+from copy import copy
+import numpy as np
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
-import numpy as np 
-from copy import copy
-
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import (
     default,
@@ -31,6 +31,13 @@ from f5_tts.model.utils import (
     mask_from_frac_lengths,
 )
 
+from einops import rearrange, repeat, reduce, pack, unpack
+from pudb import set_trace;
+# set_trace()
+from pytorch_wavelets import DWTForward, DWTInverse
+
+iwt = DWTInverse(wave='haar').cuda()
+dwt = DWTForward(J=1, wave='haar').cuda()
 
 class CFM(nn.Module):
     def __init__(
@@ -56,6 +63,7 @@ class CFM(nn.Module):
 
         # mel spec
         self.mel_spec = default(mel_spec_module, MelSpec(**mel_spec_kwargs))
+
         num_channels = default(num_channels, self.mel_spec.n_mel_channels)
         self.num_channels = num_channels
 
@@ -77,6 +85,7 @@ class CFM(nn.Module):
         # vocab map for tokenization
         self.vocab_char_map = vocab_char_map
 
+
     @property
     def device(self):
         return next(self.parameters()).device
@@ -88,6 +97,7 @@ class CFM(nn.Module):
         text: int["b nt"] | list[str],  # noqa: F722
         duration: int | int["b"],  # noqa: F821
         *,
+        text_lens : Optional[list[int]] = None, # only to be used when using text encoder separetly
         lens: int["b"] | None = None,  # noqa: F821
         steps=32,
         cfg_strength=1.0,
@@ -100,9 +110,10 @@ class CFM(nn.Module):
         t_inter=0.1,
         edit_mask=None,
     ):
+        # set_trace()
         self.eval()
         # raw wave
-
+        
         if cond.ndim == 2:
             cond = self.mel_spec(cond)
             cond = cond.permute(0, 2, 1)
@@ -114,16 +125,36 @@ class CFM(nn.Module):
         if not exists(lens):
             lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
 
-        # text
 
+        # text
         if isinstance(text, list):
             if exists(self.vocab_char_map):
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
                 text = list_str_to_tensor(text).to(device)
             assert text.shape[0] == batch
+        # elif isinstance(text, torch.Tensor):
+        #     text = text.to(device)
+        #     if text_lens is not None:
+        #         max_len = torch.max(text_lens).item()
+
+        #         # one cannot pick masked-frames from padded
+        #         pad_mask = torch.arange(max_len, device=self.device)
+        #         # B x N
+        #         pad_mask = rearrange(pad_mask, 'n -> 1 n').expand(batch, -1)
+
+        #         # False for padded portion
+        #         pad_mask = pad_mask < rearrange(text_lens, 'b -> b 1') 
+                
+        #         text_mask = pad_mask
+        #     # print("",text.shape, text_mask.shape) #torch.Size([2, 581, 1472]) torch.Size([2, 581])
+   
+        # if exists(text):
+        #     text_lens = (text != -1).sum(dim=-1)
+        #     lens = torch.maximum(text_lens, lens)  # make sure lengths are at least those of the text characters
 
         # duration
+
 
         cond_mask = lens_to_mask(lens)
         if edit_mask is not None:
@@ -132,9 +163,7 @@ class CFM(nn.Module):
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
 
-        duration = torch.maximum(
-            torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
-        )  # duration at least text/audio prompt length plus one token, so something is generated
+        duration = torch.maximum(lens + 1, duration)  # just add one token so something is generated
         duration = duration.clamp(max=max_duration)
         max_duration = duration.amax()
 
@@ -143,9 +172,6 @@ class CFM(nn.Module):
             test_cond = F.pad(cond, (0, 0, cond_seq_len, max_duration - 2 * cond_seq_len), value=0.0)
 
         cond = F.pad(cond, (0, 0, 0, max_duration - cond_seq_len), value=0.0)
-        if no_ref_audio:
-            cond = torch.zeros_like(cond)
-
         cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
         cond_mask = cond_mask.unsqueeze(-1)
         step_cond = torch.where(
@@ -157,6 +183,10 @@ class CFM(nn.Module):
         else:  # save memory and speed up, as single inference need no mask currently
             mask = None
 
+        # test for no ref audio
+        if no_ref_audio:
+            cond = torch.zeros_like(cond)
+
         # neural ode
 
         def fn(t, x):
@@ -165,13 +195,13 @@ class CFM(nn.Module):
 
             # predict flow
             pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True
+                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False
             )
             if cfg_strength < 1e-5:
                 return pred
 
             null_pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True, cache=True
+                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
             )
             return pred + (pred - null_pred) * cfg_strength
 
@@ -196,55 +226,120 @@ class CFM(nn.Module):
         t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
-        
-        # print("shape of y0:", y0.shape)
+
+        # trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
         trajectory = []
 
         def reweight(y0_, yavg_, gamma, step):
-          #y0_.shape = [1, x, 100]
+            #y0_.shape = [1, x, 100]
 
-          mel2 = y0_.detach().cpu().numpy()
-          #normalising mel
-          # mel2 = normalize_mel_spectrogram_librosa(np.maximum(mel2, 1e-6))
-          # mel2 /= np.max(np.abs(np.array(mel2)))
-          coeffs = pywt.wavedec2(mel2, 'haar', level=1)
-          cA2, (cH2, cV2, cD2) = coeffs  
-          coeffs1 = pywt.wavedec2(yavg_.detach().cpu().numpy(), 'haar', level=1)
-          cA2avg, (cH2avg, cV2avg, cD2avg) = coeffs1
+            import pdb 
+            pdb.set_trace()
+            mel2 = y0_.detach().cpu().numpy()
+            #normalising mel
+            # mel2 = normalize_mel_spectrogram_librosa(np.maximum(mel2, 1e-6))
+            # mel2 /= np.max(np.abs(np.array(mel2)))
+            coeffs = pywt.wavedec2(mel2, 'haar', level=1)
+            cA2, (cH2, cV2, cD2) = coeffs  
+            coeffs1 = pywt.wavedec2(yavg_.detach().cpu().numpy(), 'haar', level=1)
+            cA2avg, (cH2avg, cV2avg, cD2avg) = coeffs1
 
-          cA2 = (1-gamma)*(cA2) + gamma*(cA2avg)
-          cH2 = (1-gamma)*(cH2) + gamma*(cH2avg)
-          cV2 = (1-gamma)*(cV2) + gamma*(cV2avg)
-          cD2 = (1-gamma)*(cD2) + gamma*(cD2avg)
-          if y0_.shape[1] % 2 != 0:
-            yavg_ = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
-          else:
-            yavg_ = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
-          # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
-          yavg_ = yavg_.type(torch.float16)
+            cA2 = (1-gamma)*(cA2) + gamma*(cA2avg)
+            cH2 = (1-gamma)*(cH2) + gamma*(cH2avg)
+            cV2 = (1-gamma)*(cV2) + gamma*(cV2avg)
+            cD2 = (1-gamma)*(cD2) + gamma*(cD2avg)
+            if y0_.shape[1] % 2 != 0:
+                yavg_ = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
+            else:
+                yavg_ = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+            # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+            # yavg_ = yavg_.type(torch.float16)
 
-          # cA2 = (1 - (step/t.shape[0])*0.2)*cA2
-          
-          cA2 = cA2*np.exp(-step/((3+(t.shape[0]-10)*(18-3)/(60-10))*t.shape[0]))
-          cV2 = cV2*np.exp(-step/(t.shape[0]*(0.020471535365152418*(t.shape[0]**2) + 0.8300747556066685*t.shape[0] -2.154974123059176)))
-          # cA2 = cA2*np.exp(-step/(6*np.sqrt(t.shape[0])))
-          # cV2 = cV2*np.exp(-step/(20*np.sqrt(t.shape[0])))
-          # if step > (t[-1]/2.0):
+            # cA2 = (1 - (step/t.shape[0])*0.2)*cA2
+
+            cA2 = cA2*np.exp(-0.9*step/((3+(t.shape[0]-10)*(18-3)/(60-10))*t.shape[0]))
+            cV2 = cV2*np.exp(-2*step/(t.shape[0]*(0.020471535365152418*(t.shape[0]**2) + 0.8300747556066685*t.shape[0] -2.154974123059176)))
+            # cA2 = cA2*np.exp(-step/(6*np.sqrt(t.shape[0])))
+            # cV2 = cV2*np.exp(-step/(20*np.sqrt(t.shape[0])))
+            # if step > (t[-1]/2.0):
             # cH2 = (1.05 - (step/t.shape[0])*0.002)*cH2
-          # cV2 = (1.05 - (step/t.shape[0])*0.002)*cV2
-          # cD2 = (1.03 + (step/t.shape[0])*0.0002)*cD2
-          if y0_.shape[1] % 2 != 0:
-            y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
-          else:
-            y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
-          # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
-          y = y.type(torch.float16)
+            # cV2 = (1.05 - (step/t.shape[0])*0.002)*cV2
+            # cD2 = (1.03 + (step/t.shape[0])*0.0002)*cD2
+            if y0_.shape[1] % 2 != 0:
+                y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
+            else:
+                y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+            # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+            # y = y.type(torch.float16)
 
-          y = y.to(device)
-          yavg_ = yavg_.to(device)
-          return y, yavg_
+            y = y.to(device)
+            yavg_ = yavg_.to(device)
+            return y, yavg_
 
-        # cA2avg, cH2avg, cV2avg, cD2avg = torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50)), torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50)), torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50)), torch.Tensor(np.zeros((round(y0.shape[1]/2)), 50))
+        def reweight_gpu(y0_, yavg_, gamma, step):
+            #y0_.shape = [1, x, 100]
+
+            import pdb 
+            pdb.set_trace()
+            # mel2 = y0_.detach().cpu().numpy()
+            #normalising mel
+            # mel2 = normalize_mel_spectrogram_librosa(np.maximum(mel2, 1e-6))
+            # mel2 /= np.max(np.abs(np.array(mel2)))
+            # coeffs = pywt.wavedec2(mel2, 'haar', level=1)
+            mel_dwt = y0_.permute(0, 2, 1).unsqueeze(1)  # [1, 1, 100, 594]
+            yl, yh = dwt(mel_dwt) # shape: [1, 1, 100, 594]
+            cA2, (cH2, cV2, cD2) = yl.squeeze(0).permute(0,2,1), (yh[0][:,:,0,:,:].squeeze(0).permute(0,2,1), yh[0][:,:,1,:,:].squeeze(0).permute(0,2,1), yh[0][:,:,2,:,:].squeeze(0).permute(0,2,1))
+            
+            # coeffs1 = pywt.wavedec2(yavg_.detach().cpu().numpy(), 'haar', level=1)
+            # cA2avg, (cH2avg, cV2avg, cD2avg) = coeffs1
+
+            mel_dwt = yavg_.permute(0, 2, 1).unsqueeze(1)  # [1, 1, 100, 594]
+            yl, yh = dwt(mel_dwt)
+            cA2avg, (cH2avg, cV2avg, cD2avg) = yl.squeeze(0).permute(0,2,1), (yh[0][:,:,0,:,:].squeeze(0).permute(0,2,1), yh[0][:,:,1,:,:].squeeze(0).permute(0,2,1), yh[0][:,:,2,:,:].squeeze(0).permute(0,2,1))
+
+            cA2 = (1-gamma)*(cA2) + gamma*(cA2avg)
+            cH2 = (1-gamma)*(cH2) + gamma*(cH2avg)
+            cV2 = (1-gamma)*(cV2) + gamma*(cV2avg)
+            cD2 = (1-gamma)*(cD2) + gamma*(cD2avg)
+
+            yl = cA2.permute(0, 2, 1).unsqueeze(1)  # [1, 1, 100, 594]
+            yh = torch.cat((cH2.permute(0, 2, 1).unsqueeze(1).unsqueeze(2), cV2.permute(0, 2, 1).unsqueeze(1).unsqueeze(2), cD2.permute(0, 2, 1).unsqueeze(1).unsqueeze(2)), dim=2)         
+            if y0_.shape[1] % 2 != 0: 
+                yavg_ = iwt((yl, [yh])).squeeze(0).permute(0,2,1)[:, :-1, :]
+            else:
+                yavg_ = iwt((yl, [yh])).squeeze(0).permute(0,2,1) #  torch.Size([1, 594, 100])
+            
+            # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+            # yavg_ = yavg_.type(torch.float16)
+
+            # cA2 = (1 - (step/t.shape[0])*0.2)*cA2
+
+            cA2 = cA2*np.exp(-0.9*step/((3+(t.shape[0]-10)*(18-3)/(60-10))*t.shape[0]))
+            cV2 = cV2*np.exp(-2*step/(t.shape[0]*(0.020471535365152418*(t.shape[0]**2) + 0.8300747556066685*t.shape[0] -2.154974123059176)))
+            # cA2 = cA2*np.exp(-step/(6*np.sqrt(t.shape[0])))
+            # cV2 = cV2*np.exp(-step/(20*np.sqrt(t.shape[0])))
+            # if step > (t[-1]/2.0):
+            # cH2 = (1.05 - (step/t.shape[0])*0.002)*cH2
+            # cV2 = (1.05 - (step/t.shape[0])*0.002)*cV2
+            # cD2 = (1.03 + (step/t.shape[0])*0.0002)*cD2
+            # if y0_.shape[1] % 2 != 0:
+            #     y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar')[:, :-1, :])
+            # else:
+            #     y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+
+            yl = cA2.permute(0, 2, 1).unsqueeze(1)  # [1, 1, 100, 594]
+            yh = torch.cat((cH2.permute(0, 2, 1).unsqueeze(1).unsqueeze(2), cV2.permute(0, 2, 1).unsqueeze(1).unsqueeze(2), cD2.permute(0, 2, 1).unsqueeze(1).unsqueeze(2)), dim=2)         
+            if y0_.shape[1] % 2 != 0: 
+                y = iwt((yl, [yh])).squeeze(0).permute(0,2,1)[:, :-1, :]
+            else:
+                y = iwt((yl, [yh])).squeeze(0).permute(0,2,1) #  torch.Size([1, 594, 100])
+
+            # y = torch.Tensor(pywt.idwt2((cA2, (cH2, cV2, cD2)), wavelet='haar'))
+            # y = y.type(torch.float16)
+            y = y.to(device)
+            yavg_ = yavg_.to(device)
+            return y, yavg_
+
         yavg = copy(y0)
         ytemp = y0
 
@@ -256,22 +351,20 @@ class CFM(nn.Module):
             y_1, y0 = None, None
             if trajectory_i.shape[0] == 2:
                 y_1, y0 = trajectory_i
-                y0, yavg = reweight(y0, yavg, 0.05, i)              #this is the one being called
+                y0, yavg = reweight_gpu(y0, yavg, 0.00, i)              #this is the one being called
             else:
                 y0, yavg = reweight(trajectory_i[-1], yavg, 1, i)
 
-        
             if y_1 is not None and not any(torch.equal(y_1, t) for t in trajectory):
                 trajectory.append(y_1)
             trajectory.append(y0)
           # trajectory = torch.cat([trajectory, y0.unsqueeze(0)], dim=0)
           # trajectory.append(y0)
         trajectory = torch.stack(trajectory)
+        # self.transformer.clear_cache()
 
-        self.transformer.clear_cache()
-
-        sampled = 3*trajectory[int(-0.006147211040828051*(t.shape[0]**2) + 1.0969522714203557*(t.shape[0]) -3.1625934445083077)]
-        # sampled = 3*trajectory[-1]
+        # sampled = 2.4*trajectory[int(-0.006147211040828051*(t.shape[0]**2) + 1.0969522714203557*(t.shape[0]) -3.1625934445083077)]          
+        sampled = trajectory[-1]
         out = sampled
         out = torch.where(cond_mask, cond, out)
 
@@ -285,9 +378,11 @@ class CFM(nn.Module):
         self,
         inp: float["b n d"] | float["b nw"],  # mel or raw wave  # noqa: F722
         text: int["b nt"] | list[str],  # noqa: F722
+        text_lens : None,
         *,
         lens: int["b"] | None = None,  # noqa: F821
         noise_scheduler: str | None = None,
+        **kwargs
     ):
         # handle raw wave
         if inp.ndim == 2:
@@ -298,18 +393,35 @@ class CFM(nn.Module):
         batch, seq_len, dtype, device, _σ1 = *inp.shape[:2], inp.dtype, self.device, self.sigma
 
         # handle text as string
+        text_mask = None
         if isinstance(text, list):
             if exists(self.vocab_char_map):
+                # print(self.vocab_char_map)
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
                 text = list_str_to_tensor(text).to(device)
             assert text.shape[0] == batch
+        elif isinstance(text, torch.Tensor):
+            text = text.to(device)
+            if text_lens is not None:
+                max_len = torch.max(text_lens).item()
+
+                # one cannot pick masked-frames from padded
+                pad_mask = torch.arange(max_len, device=self.device)
+                # B x N
+                pad_mask = rearrange(pad_mask, 'n -> 1 n').expand(batch, -1)
+
+                # False for padded portion
+                pad_mask = pad_mask < rearrange(text_lens, 'b -> b 1') 
+                
+                text_mask = pad_mask
+            # print("",text.shape, text_mask.shape) #torch.Size([2, 581, 1472]) torch.Size([2, 581])
 
         # lens and mask
         if not exists(lens):
             lens = torch.full((batch,), seq_len, device=device)
 
-        mask = lens_to_mask(lens, length=seq_len)  # useless here, as collate_fn will pad to max length in batch
+        mask = lens_to_mask(lens, length=seq_len)  # useless here, as collate_fn will pad to max length in batch (True for unpadded)
 
         # get a random span to mask out for training conditionally
         frac_lengths = torch.zeros((batch,), device=self.device).float().uniform_(*self.frac_lengths_mask)
@@ -347,8 +459,8 @@ class CFM(nn.Module):
         # if want rigourously mask out padding, record in collate_fn in dataset.py, and pass in here
         # adding mask will use more memory, thus also need to adjust batchsampler with scaled down threshold for long sequences
         pred = self.transformer(
-            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text
-        )
+            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, text_mask=text_mask)
+
 
         # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")
