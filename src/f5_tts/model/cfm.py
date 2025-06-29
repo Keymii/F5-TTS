@@ -32,7 +32,6 @@ from f5_tts.model.utils import (
 )
 
 from einops import rearrange, repeat, reduce, pack, unpack
-from pudb import set_trace;
 # set_trace()
 from pytorch_wavelets import DWTForward, DWTInverse
 
@@ -233,8 +232,8 @@ class CFM(nn.Module):
         def reweight(y0_, yavg_, gamma, step):
             #y0_.shape = [1, x, 100]
 
-            import pdb 
-            pdb.set_trace()
+            # import pdb 
+            # pdb.set_trace()
             mel2 = y0_.detach().cpu().numpy()
             #normalising mel
             # mel2 = normalize_mel_spectrogram_librosa(np.maximum(mel2, 1e-6))
@@ -279,8 +278,8 @@ class CFM(nn.Module):
         def reweight_gpu(y0_, yavg_, gamma, step):
             #y0_.shape = [1, x, 100]
 
-            import pdb 
-            pdb.set_trace()
+            # import pdb 
+            # pdb.set_trace()
             # mel2 = y0_.detach().cpu().numpy()
             #normalising mel
             # mel2 = normalize_mel_spectrogram_librosa(np.maximum(mel2, 1e-6))
